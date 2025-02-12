@@ -22,10 +22,10 @@ git clone https://github.com/yourusername/fix-diff.git
 cd fix-diff
 
 # Make the script executable
-chmod +x fixdiff.sh
+chmod +x fix-diff.sh
 
 # Optional: Add to your PATH for system-wide access
-sudo ln -s "$(pwd)/fixdiff.sh" /usr/local/bin/fix-diff
+sudo ln -s "$(pwd)/fix-diff.sh" /usr/local/bin/fix-diff
 ```
 
 ## Usage
