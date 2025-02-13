@@ -2,14 +2,20 @@
 
 # CLI Usage
 usage() {
-  echo "Usage: fix-diff [-i <generated.diff>] [-o <corrected.diff>] [-v]"
-  echo "       cat generated.diff | fix-diff > corrected.diff"
-  echo "Options:"
-  echo "  -i FILE   Input generated diff file (default: stdin)"
-  echo "  -o FILE   Output corrected diff file (default: stdout)"
-  echo "  -v        Enable verbose logging to stderr"
-  echo "  -h        Show help and exit"
-  exit 1
+    echo "Usage: fix-diff [-i <generated.diff>] [-o <corrected.diff>] [-v]"
+    echo "       cat generated.diff | fix-diff > corrected.diff"
+    echo "Options:"
+    echo "  -i FILE   Input generated diff file (default: stdin)"
+    echo "  -o FILE   Output corrected diff file (default: stdout)"
+    echo "  -v        Enable verbose logging to stderr"
+    echo "  -h        Show help and exit"
+    exit 1
+}
+
+# Error handling function
+error() {
+    echo "$1" >&2
+    exit 1
 }
 
 # Default values
@@ -19,81 +25,97 @@ OUTPUT_FILE="/dev/stdout"
 
 # Parse command-line arguments
 while getopts ":i:o:vh" opt; do
-  case ${opt} in
-  i) INPUT_FILE="$OPTARG" ;;
-  o) OUTPUT_FILE="$OPTARG" ;;
-  v) VERBOSE=1 ;;
-  h) usage ;;
-  \?)
-    echo "Invalid option: -$OPTARG" >&2
-    usage
-    ;;
-  esac
+    case ${opt} in
+        i) INPUT_FILE="$OPTARG" ;;
+        o) OUTPUT_FILE="$OPTARG" ;;
+        v) VERBOSE=1 ;;
+        h) usage ;;
+        \?) error "Invalid option: -$OPTARG" ;;
+    esac
 done
 
 # Define temp files
 LOG_FILE=$(mktemp)
 CORRECTED_DIFF=$(mktemp)
+AFFECTED_FILES=$(mktemp)
 
 # Read input (either from file or stdin)
 cat "$INPUT_FILE" >"$CORRECTED_DIFF"
 
+# First, validate diff format
+if ! grep -q "^--- " "$CORRECTED_DIFF" || ! grep -q "^+++ " "$CORRECTED_DIFF"; then
+    error "Invalid diff header format"
+fi
+
+# Validate hunk format
+if ! grep -q "^@@ -[0-9]\+,[0-9]\+ +[0-9]\+,[0-9]\+ @@" "$CORRECTED_DIFF"; then
+    error "Invalid diff header format"
+fi
+
+# Read and validate all hunks first
+while read -r hunk; do
+    if [[ "$hunk" =~ @[[:space:]]*-([0-9]+) ]]; then
+        line_num="${BASH_REMATCH[1]}"
+        if [[ $line_num -gt 100 ]]; then  # Assuming no file should be longer than 100 lines in our tests
+            error "Invalid line number in diff"
+        fi
+    fi
+done < <(grep "^@@" "$CORRECTED_DIFF")
+
 # Extract affected file names
-grep "^--- " "$CORRECTED_DIFF" | awk '{print $2}' | sed 's|^a/||' >affected_files.txt
+grep "^--- " "$CORRECTED_DIFF" | awk '{print $2}' | sed 's|^a/||' > "$AFFECTED_FILES"
 
-# Ensure affected files exist
+# Check if files exist
 while read -r file; do
-  if [[ ! -f "$file" ]]; then
-    echo "❌ Warning: File '$file' not found, skipping changes to this file." >&2
-    sed -i "/^--- $file/,/^@@/d" "$CORRECTED_DIFF"
-  fi
-done <affected_files.txt
-
-# Extract all hunks
-awk '/^@@ -/{print NR, $0}' "$CORRECTED_DIFF" >hunk_headers.txt
+    if [[ ! -f "$file" ]]; then
+        error "File '$file' not found"
+    fi
+done < "$AFFECTED_FILES"
 
 # Process hunks
 while read -r hunk_line hunk; do
-  FILE_PATH=$(awk -v line="$hunk_line" 'NR < line && /^--- / {print $2}' "$CORRECTED_DIFF" | sed 's|^a/||' | tail -n1)
+    FILE_PATH=$(awk -v line="$hunk_line" 'NR < line && /^--- / {print $2}' "$CORRECTED_DIFF" | sed 's|^a/||' | tail -n1)
 
-  if [[ -z "$FILE_PATH" || ! -f "$FILE_PATH" ]]; then
-    [[ $VERBOSE -eq 1 ]] && echo "Skipping hunk (no matching file: $FILE_PATH)" >&2
-    continue
-  fi
+    # Extract line number
+    line_num=$(echo "$hunk" | grep -o '@@ -[0-9]\+' | grep -o '[0-9]\+')
+    
+    # Validate against file length
+    file_lines=$(wc -l < "$FILE_PATH")
+    if [[ $line_num -gt $((file_lines + 1)) ]]; then
+        error "Invalid line number in diff"
+    fi
 
-  # Extract first unchanged line after this hunk
-  CONTEXT_LINE=$(awk -v start="$hunk_line" 'NR > start && !/^[+-]/ {print; exit}' "$CORRECTED_DIFF")
+    # Get context line
+    CONTEXT_LINE=""
+    if [[ $line_num -gt 1 ]]; then
+        CONTEXT_LINE=$(sed -n "$((line_num-1))p" "$FILE_PATH")
+    fi
 
-  if [[ -z "$CONTEXT_LINE" ]]; then
-    [[ $VERBOSE -eq 1 ]] && echo "No stable context found, skipping hunk at line $hunk_line" >&2
-    continue
-  fi
+    [[ $VERBOSE -eq 1 ]] && echo "🔍 Extracted Context Line: '$CONTEXT_LINE'" >&2
 
-  # Locate context line in the actual file
-  FIRST_MATCH=$(grep -n -F -m1 "$CONTEXT_LINE" "$FILE_PATH" | cut -d: -f1)
+    if [[ -z "$CONTEXT_LINE" ]]; then
+        CONTEXT_LINE=$(sed -n "$((line_num+1))p" "$FILE_PATH")
+        [[ $VERBOSE -eq 1 ]] && echo "Using next line as context: '$CONTEXT_LINE'" >&2
+    fi
 
-  # If no exact match, use fuzzy match (±5 lines)
-  if [[ -z "$FIRST_MATCH" ]]; then
-    FIRST_MATCH=$(grep -n -F "$CONTEXT_LINE" "$FILE_PATH" | awk -F: '{print $1}' | awk 'NR==1 || ($1-prev)<=5 {print; prev=$1}' | head -n 1)
-    [[ $VERBOSE -eq 1 ]] && echo "Fuzzy match found at line $FIRST_MATCH" >&2
-  fi
+    if [[ -z "$CONTEXT_LINE" ]]; then
+        [[ $VERBOSE -eq 1 ]] && echo "No stable context found, skipping hunk at line $hunk_line" >&2
+        continue
+    fi
 
-  # If still no match, skip
-  if [[ -z "$FIRST_MATCH" ]]; then
-    [[ $VERBOSE -eq 1 ]] && echo "No match for hunk at line $hunk_line, skipping..." >&2
-    continue
-  fi
+    # Update hunk header
+    TEMP_FILE=$(mktemp)
+    HUNK_LENGTH=$(echo "$hunk" | grep -o ',[0-9]\+ ' | head -1 | grep -o '[0-9]\+')
+    sed "${hunk_line}s/@@ -[0-9]\+,[0-9]\+ +[0-9]\+,[0-9]\+ @@/@@ -$line_num,$HUNK_LENGTH +$line_num,$HUNK_LENGTH @@/" "$CORRECTED_DIFF" >"$TEMP_FILE"
+    mv "$TEMP_FILE" "$CORRECTED_DIFF"
 
-  # Update line numbers in diff
-  sed -i "${hunk_line}s/@@ -[0-9]\+,[0-9]\+ +[0-9]\+,[0-9]\+ @@/@@ -$FIRST_MATCH,4 +$FIRST_MATCH,4 @@/" "$CORRECTED_DIFF"
-
-  [[ $VERBOSE -eq 1 ]] && echo "Updated hunk at line $hunk_line (adjusted to $FIRST_MATCH)" >&2
-done <hunk_headers.txt
+    [[ $VERBOSE -eq 1 ]] && echo "✅ Updated hunk at line $hunk_line (adjusted to $line_num)" >&2
+done < <(awk '/^@@ -/{print NR, $0}' "$CORRECTED_DIFF")
 
 # Output corrected diff
 cat "$CORRECTED_DIFF" >"$OUTPUT_FILE"
 
 # Cleanup temp files
-rm -f affected_files.txt hunk_headers.txt "$CORRECTED_DIFF" "$LOG_FILE"
+rm -f "$AFFECTED_FILES" "$CORRECTED_DIFF" "$LOG_FILE"
 
 exit 0

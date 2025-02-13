@@ -1,0 +1,5 @@
+--- nonexistent.txt	2024-02-13
++++ nonexistent.txt	2024-02-13
+@@ -1,1 +1,1 @@
+-Line
++Modified line

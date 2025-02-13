@@ -1,0 +1,9 @@
+--- source.txt	2024-02-13
++++ source.txt	2024-02-13
+@@ -2,3 +2,3 @@
+-Second line
+-Third line
+-Fourth line
++Modified second line
++Modified third line
++Modified fourth line

@@ -1,0 +1,4 @@
+Line with @@ symbols
+Line with --- marks
+Line with +++ marks
+Normal line
